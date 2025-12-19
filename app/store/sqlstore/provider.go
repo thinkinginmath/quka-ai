@@ -2,8 +2,10 @@ package sqlstore
 
 import (
 	"context"
+	"embed"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -92,6 +94,12 @@ func MustSetup(m sqlstore.ConnectConfig, s ...sqlstore.ConnectConfig) func() *Pr
 	}
 }
 
+// MigrationRecord represents a migration record in the database
+type MigrationRecord struct {
+	Filename   string `db:"filename"`
+	ExecutedAt int64  `db:"executed_at"`
+}
+
 // Install 初始化所有数据表
 func (p *Provider) Install() error {
 	// 首先启用必要的数据库扩展
@@ -104,7 +112,7 @@ func (p *Provider) Install() error {
 		return err
 	}
 
-	// 获取所有SQL文件
+	// 1. 执行 schema 文件 (表创建)
 	files, err := CreateTableFiles.ReadDir(".")
 	if err != nil {
 		return err
@@ -112,30 +120,76 @@ func (p *Provider) Install() error {
 
 	for _, file := range files {
 		if !file.IsDir() && strings.HasSuffix(file.Name(), ".sql") {
-			// 检查文件是否已经执行过
-			if executed, err := p.isFileExecuted(file.Name()); err != nil {
-				return err
-			} else if executed {
-				continue // 跳过已执行的文件
-			}
-
-			sql, err := CreateTableFiles.ReadFile(file.Name())
-			if err != nil {
-				return err
-			}
-
-			// 执行SQL文件内容
-			if err = p.executeSQLFile(string(sql), file.Name()); err != nil {
-				return err
-			}
-
-			// 记录文件已执行
-			if err = p.markFileExecuted(file.Name()); err != nil {
+			if err := p.runMigrationFile(file.Name(), CreateTableFiles); err != nil {
 				return err
 			}
 		}
 	}
+
+	// 2. 执行 migrations 文件 (增量变更)
+	migrationFiles, err := MigrationFiles.ReadDir("migrations")
+	if err != nil {
+		// migrations 目录可能不存在，忽略错误
+		return nil
+	}
+
+	for _, file := range migrationFiles {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".sql") {
+			// 使用带前缀的文件名来区分 schema 和 migration
+			migrationName := "migrations/" + file.Name()
+			if err := p.runMigrationFileWithPath(migrationName, "migrations/"+file.Name(), MigrationFiles); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
+}
+
+// runMigrationFile 执行单个迁移文件 (从 embed.FS 读取)
+func (p *Provider) runMigrationFile(filename string, fs embed.FS) error {
+	// 检查文件是否已经执行过
+	if executed, err := p.isFileExecuted(filename); err != nil {
+		return err
+	} else if executed {
+		return nil // 跳过已执行的文件
+	}
+
+	sql, err := fs.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+
+	// 执行SQL文件内容
+	if err = p.executeSQLFile(string(sql), filename); err != nil {
+		return err
+	}
+
+	// 记录文件已执行
+	return p.markFileExecuted(filename)
+}
+
+// runMigrationFileWithPath 执行迁移文件，支持不同的记录名和文件路径
+func (p *Provider) runMigrationFileWithPath(recordName, filePath string, fs embed.FS) error {
+	// 检查文件是否已经执行过
+	if executed, err := p.isFileExecuted(recordName); err != nil {
+		return err
+	} else if executed {
+		return nil // 跳过已执行的文件
+	}
+
+	sql, err := fs.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	// 执行SQL文件内容
+	if err = p.executeSQLFile(string(sql), recordName); err != nil {
+		return err
+	}
+
+	// 记录文件已执行
+	return p.markFileExecuted(recordName)
 }
 
 // enableExtensions 启用必要的数据库扩展
@@ -188,12 +242,84 @@ func (p *Provider) markFileExecuted(filename string) error {
 
 // executeSQLFile 执行SQL文件内容，分割语句并逐个执行
 func (p *Provider) executeSQLFile(content, filename string) error {
-	fmt.Println("executeSQLFile", content)
+	fmt.Printf("📄 Executing migration: %s\n", filename)
 	// 执行语句
 	if _, err := p.SqlProvider.GetMaster().Exec(content); err != nil {
-		return err
+		return fmt.Errorf("failed to execute %s: %w", filename, err)
 	}
+	fmt.Printf("✅ Completed: %s\n", filename)
 	return nil
+}
+
+// GetAllMigrationFiles 获取所有迁移文件列表 (schema + migrations)
+func (p *Provider) GetAllMigrationFiles() ([]string, error) {
+	var allFiles []string
+
+	// 1. 获取 schema 文件
+	schemaFiles, err := CreateTableFiles.ReadDir(".")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read schema files: %w", err)
+	}
+	for _, f := range schemaFiles {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ".sql") {
+			allFiles = append(allFiles, f.Name())
+		}
+	}
+
+	// 2. 获取 migration 文件
+	migrationFiles, err := MigrationFiles.ReadDir("migrations")
+	if err == nil {
+		for _, f := range migrationFiles {
+			if !f.IsDir() && strings.HasSuffix(f.Name(), ".sql") {
+				allFiles = append(allFiles, "migrations/"+f.Name())
+			}
+		}
+	}
+
+	sort.Strings(allFiles)
+	return allFiles, nil
+}
+
+// GetExecutedMigrations 获取已执行的迁移记录
+func (p *Provider) GetExecutedMigrations() ([]MigrationRecord, error) {
+	// 先确保表存在
+	if err := p.ensureMigrationTable(); err != nil {
+		return nil, err
+	}
+
+	var records []MigrationRecord
+	query := "SELECT filename, executed_at FROM " + types.TABLE_PREFIX + "schema_migrations ORDER BY filename"
+	if err := p.SqlProvider.GetReplica().Select(&records, query); err != nil {
+		return nil, fmt.Errorf("failed to get executed migrations: %w", err)
+	}
+	return records, nil
+}
+
+// GetPendingMigrations 获取待执行的迁移文件列表
+func (p *Provider) GetPendingMigrations() ([]string, error) {
+	allFiles, err := p.GetAllMigrationFiles()
+	if err != nil {
+		return nil, err
+	}
+
+	executed, err := p.GetExecutedMigrations()
+	if err != nil {
+		return nil, err
+	}
+
+	executedMap := make(map[string]bool)
+	for _, m := range executed {
+		executedMap[m.Filename] = true
+	}
+
+	var pending []string
+	for _, f := range allFiles {
+		if !executedMap[f] {
+			pending = append(pending, f)
+		}
+	}
+
+	return pending, nil
 }
 
 func (p *Provider) store() *Stores {
