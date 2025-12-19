@@ -169,7 +169,40 @@ func checkAuthToken(c *gin.Context, core *core.Core) (bool, error) {
 
 func FlexibleAuth(core *core.Core) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 1. 尝试 Header 认证 (X-Access-Token)
+		// 1. 尝试 Auth0 Bearer Token 认证 (Authorization: Bearer xxx)
+		if core.Auth0Enabled() {
+			if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+				token := strings.TrimPrefix(authHeader, "Bearer ")
+				passed, authErr := ParseAuth0Token(c, token, core)
+				if authErr != nil {
+					response.APIError(c, errors.Trace("middleware.FlexibleAuth.ParseAuth0Token", authErr))
+					return
+				}
+				if passed {
+					return
+				}
+			}
+		}
+
+		// 2. 尝试共享 Session Cookie 认证 (session_id cookie from .scimigo.com)
+		if core.Auth0Enabled() && core.SessionService() != nil {
+			if sessionID, err := c.Cookie("session_id"); err == nil && sessionID != "" {
+				passed, authErr := ParseSharedSessionCookie(c, sessionID, core)
+				if authErr != nil {
+					// Session 无效不是致命错误，继续尝试其他认证方式
+					// 只有在明确的内部错误时才返回错误
+					if !strings.Contains(authErr.Error(), "session not found") {
+						response.APIError(c, errors.Trace("middleware.FlexibleAuth.ParseSharedSessionCookie", authErr))
+						return
+					}
+				}
+				if passed {
+					return
+				}
+			}
+		}
+
+		// 3. 尝试 Header 认证 (X-Access-Token)
 		matched, err := checkAccessToken(c, core)
 		if err != nil {
 			response.APIError(c, errors.Trace("middleware.FlexibleAuth.checkAccessToken", err))
@@ -180,7 +213,7 @@ func FlexibleAuth(core *core.Core) gin.HandlerFunc {
 			return
 		}
 
-		// 2. 尝试 Header 认证 (X-Authorization)
+		// 4. 尝试 Header 认证 (X-Authorization)
 		matched, err = checkAuthToken(c, core)
 		if err != nil {
 			response.APIError(c, errors.Trace("middleware.FlexibleAuth.checkAuthToken", err))
@@ -191,7 +224,7 @@ func FlexibleAuth(core *core.Core) gin.HandlerFunc {
 			return
 		}
 
-		// 3. 尝试 Cookie 认证 (quka-auth)
+		// 5. 尝试 Cookie 认证 (quka-auth)
 		if cookieToken, err := c.Cookie("quka-auth"); err == nil && cookieToken != "" {
 			passed, authErr := ParseAuthToken(c, cookieToken, core)
 			if authErr != nil {
@@ -204,7 +237,7 @@ func FlexibleAuth(core *core.Core) gin.HandlerFunc {
 			}
 		}
 
-		// 4. 尝试查询参数认证
+		// 6. 尝试查询参数认证
 		tokenValue := c.Query("token")
 		tokenType := c.Query("token-type")
 
@@ -420,4 +453,156 @@ func createUserGlobalRole(core *core.Core, appid, userID, role string) error {
 	}
 
 	return core.Store().UserGlobalRoleStore().Create(ctx, globalRole)
+}
+
+// ParseAuth0Token 解析并验证 Auth0 access token
+// 如果用户不存在，会自动创建用户 (懒加载)
+func ParseAuth0Token(c *gin.Context, token string, core *core.Core) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	// 验证 Auth0 token
+	auth0Claims, err := core.Auth0Validator().ValidateAccessToken(ctx, token)
+	if err != nil {
+		return false, errors.New("ParseAuth0Token.ValidateAccessToken", i18n.ERROR_UNAUTHORIZED, err).Code(http.StatusUnauthorized)
+	}
+
+	// 懒加载: 获取或创建用户
+	user, err := getOrCreateAuth0User(ctx, core, auth0Claims)
+	if err != nil {
+		return false, errors.New("ParseAuth0Token.getOrCreateAuth0User", i18n.ERROR_INTERNAL, err)
+	}
+
+	c.Set(v1.TOKEN_CONTEXT_KEY, security.NewTokenClaims(user.Appid, types.DEFAULT_APPID, user.ID, user.PlanID, "", time.Now().Add(24*time.Hour).Unix()))
+	return true, nil
+}
+
+// ParseSharedSessionCookie 解析共享 session cookie (来自 .scimigo.com)
+// 读取 Math-Agents 创建的 session，从中提取 Auth0 ID token 进行验证
+func ParseSharedSessionCookie(c *gin.Context, sessionID string, core *core.Core) (bool, error) {
+	if sessionID == "" {
+		return false, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	// 从 Redis 获取共享 session
+	session, err := core.SessionService().GetSharedSession(ctx, sessionID)
+	if err != nil {
+		return false, errors.New("ParseSharedSessionCookie.GetSharedSession", i18n.ERROR_UNAUTHORIZED, err).Code(http.StatusUnauthorized)
+	}
+
+	// 解析 ID token 获取 auth0 claims
+	auth0Claims, err := core.Auth0Validator().ParseIDToken(ctx, session.IDToken)
+	if err != nil {
+		return false, errors.New("ParseSharedSessionCookie.ParseIDToken", i18n.ERROR_UNAUTHORIZED, err).Code(http.StatusUnauthorized)
+	}
+
+	// 懒加载: 获取或创建用户
+	user, err := getOrCreateAuth0User(ctx, core, auth0Claims)
+	if err != nil {
+		return false, errors.New("ParseSharedSessionCookie.getOrCreateAuth0User", i18n.ERROR_INTERNAL, err)
+	}
+
+	c.Set(v1.TOKEN_CONTEXT_KEY, security.NewTokenClaims(user.Appid, types.DEFAULT_APPID, user.ID, user.PlanID, "", time.Now().Add(24*time.Hour).Unix()))
+	return true, nil
+}
+
+// getOrCreateAuth0User 根据 Auth0 Claims 获取或创建用户
+// 这是懒加载的核心逻辑: 首次登录时自动创建 QukaAI 用户
+func getOrCreateAuth0User(ctx context.Context, core *core.Core, auth0Claims *auth.Auth0Claims) (*types.User, error) {
+	appid := core.DefaultAppid()
+
+	// 1. 尝试通过 auth0_id 查找现有用户
+	user, err := core.Store().UserStore().GetByAuth0ID(ctx, appid, auth0Claims.Sub)
+	if err == nil {
+		return user, nil
+	}
+
+	if err != sql.ErrNoRows {
+		return nil, fmt.Errorf("failed to get user by auth0_id: %w", err)
+	}
+
+	// 2. 用户不存在，创建新用户
+	userID := utils.GenUniqIDStr()
+	now := time.Now().Unix()
+
+	// 用户名处理: 如果没有名字，使用邮箱前缀
+	userName := auth0Claims.Name
+	if userName == "" && auth0Claims.Email != "" {
+		parts := strings.Split(auth0Claims.Email, "@")
+		userName = parts[0]
+	}
+	if userName == "" {
+		userName = "User"
+	}
+
+	// 头像处理: 使用 Auth0 提供的头像或默认头像
+	avatar := auth0Claims.Picture
+	if avatar == "" {
+		avatar = core.Cfg().Site.DefaultAvatar
+	}
+
+	auth0ID := auth0Claims.Sub
+	newUser := types.User{
+		ID:        userID,
+		Appid:     appid,
+		Auth0ID:   &auth0ID,
+		Email:     auth0Claims.Email,
+		Name:      userName,
+		Avatar:    avatar,
+		Source:    "auth0",
+		UpdatedAt: now,
+		CreatedAt: now,
+	}
+
+	// 3. 事务: 创建用户 + 默认 plan + 默认 workspace
+	err = core.Store().Transaction(ctx, func(txCtx context.Context) error {
+		// 创建默认 plan
+		defaultPlan, err := core.Plugins.CreateUserDefaultPlan(txCtx, appid, userID)
+		if err != nil {
+			return fmt.Errorf("failed to create default plan: %w", err)
+		}
+		newUser.PlanID = defaultPlan
+
+		// 创建用户
+		if err := core.Store().UserStore().Create(txCtx, newUser); err != nil {
+			return fmt.Errorf("failed to create user: %w", err)
+		}
+
+		// 创建默认 workspace
+		spaceID := utils.GenRandomID()
+		spaceName := fmt.Sprintf("%s's Knowledge Base", userName)
+		if err := core.Store().SpaceStore().Create(txCtx, types.Space{
+			SpaceID:     spaceID,
+			Title:       spaceName,
+			Description: "default space",
+			CreatedAt:   now,
+		}); err != nil {
+			return fmt.Errorf("failed to create space: %w", err)
+		}
+
+		// 关联用户和 workspace
+		if err := core.Store().UserSpaceStore().Create(txCtx, types.UserSpace{
+			UserID:    userID,
+			SpaceID:   spaceID,
+			Role:      "chief",
+			CreatedAt: now,
+		}); err != nil {
+			return fmt.Errorf("failed to create user-space relation: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &newUser, nil
 }

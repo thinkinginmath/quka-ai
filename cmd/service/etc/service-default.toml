@@ -27,6 +27,17 @@ use_path_style = true
 encrypt_key="aaaaaaaaaaaaaaaa"
 
 [custom_config.chunk_service]
-enabled=true 
+enabled=true
 address="chunker:35051"
 timeout=10
+
+# Auth0 SSO Configuration (for kb.scimigo.com deployment)
+# Enables shared authentication with app.scimigo.com
+[auth0]
+enabled = false
+domain = "your-tenant.auth0.com"
+client_id = ""
+client_secret = ""
+audience = "https://api.scimigo.com"
+callback_url = "https://kb.scimigo.com/api/v1/auth/callback"
+redis_url = "redis://localhost:6379/0"  # Shared Redis for SSO session

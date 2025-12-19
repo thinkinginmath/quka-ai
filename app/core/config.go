@@ -67,7 +67,20 @@ type CoreConfig struct {
 
 	Prompt Prompt `toml:"prompt"`
 
+	Auth0 Auth0Config `toml:"auth0"`
+
 	bytes []byte `toml:"-"`
+}
+
+// Auth0Config Auth0 SSO 配置
+type Auth0Config struct {
+	Enabled      bool   `toml:"enabled"`       // 是否启用 Auth0 认证
+	Domain       string `toml:"domain"`        // Auth0 域名 (e.g., "scimigo.auth0.com")
+	ClientID     string `toml:"client_id"`     // Auth0 Client ID
+	ClientSecret string `toml:"client_secret"` // Auth0 Client Secret
+	Audience     string `toml:"audience"`      // Auth0 API Audience (e.g., "https://api.scimigo.com")
+	CallbackURL  string `toml:"callback_url"`  // OAuth 回调 URL (e.g., "https://kb.scimigo.com/api/v1/auth/callback")
+	RedisURL     string `toml:"redis_url"`     // 共享 session 的 Redis URL (用于跨应用 SSO)
 }
 
 type ObjectStorageDriver struct {

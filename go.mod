@@ -21,6 +21,7 @@ require (
 	github.com/davidscottmills/goeditorjs v1.0.0
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible
 	github.com/gin-gonic/gin v1.10.0
+	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/google/generative-ai-go v0.18.0
 	github.com/holdno/firetower v0.4.5
 	github.com/holdno/snowFlakeByGo v1.0.0

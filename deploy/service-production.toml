@@ -1,0 +1,85 @@
+# Quka AI Production Configuration
+# For kb.scimigo.com deployment
+#
+# INSTRUCTIONS:
+# 1. Copy this file and fill in the actual values
+# 2. Base64 encode: cat service-production.toml | base64
+# 3. Store in AWS Secrets Manager:
+#    aws secretsmanager update-secret \
+#      --secret-id prod/quka/config \
+#      --secret-string "$(cat service-production.toml | base64)" \
+#      --region us-east-1
+
+addr = ":33033"
+
+[log]
+level = "info"
+path = ""
+
+[postgres]
+# Get from AWS RDS or create dedicated database
+# Format: postgresql://username:password@host:5432/database?sslmode=require
+dsn = "postgresql://quka:PASSWORD@quka-db.xxxxx.us-east-1.rds.amazonaws.com:5432/quka?sslmode=require"
+
+[site]
+default_avatar = "/image/default_avatar.png"
+
+[site.share]
+site_title = "Quka.AI Knowledge Base"
+site_description = "Quka.AI - Build your second brain"
+domain = "kb.scimigo.com"
+embedding_domain = "kb.scimigo.com"
+
+[object_storage]
+static_domain = "https://kb.scimigo.com"
+driver = "s3"
+
+[object_storage.s3]
+bucket = "quka-ai-storage"
+region = "us-east-1"
+# Leave empty for AWS S3 (uses IAM role)
+endpoint = ""
+access_key = ""
+secret_key = ""
+use_path_style = false
+
+[custom_config]
+# 16-character encryption key for data encryption
+encrypt_key = "YOUR_16_CHAR_KEY"
+
+[custom_config.chunk_service]
+# If you have a chunker service deployed
+enabled = false
+address = ""
+timeout = 10
+
+# Centrifuge WebSocket configuration
+[centrifuge]
+max_connections = 1000
+heartbeat_interval = 25
+deployment_mode = "distributed"
+# Use same Redis as math-agents for shared state
+redis_url = "redis://math-agents-cache.xxxxx.cache.amazonaws.com:6379"
+redis_cluster = false
+enable_presence = true
+enable_history = true
+enable_recovery = true
+allowed_origins = ["https://kb.scimigo.com", "https://app.scimigo.com"]
+max_channel_length = 255
+max_message_size = 65536
+
+# Auth0 SSO Configuration
+# CRITICAL: Must use same Auth0 tenant as app.scimigo.com for SSO
+[auth0]
+enabled = true
+# Same domain as math-agents
+domain = "scimigo.auth0.com"
+# Can use same client or create kb.scimigo.com-specific client in Auth0
+client_id = "YOUR_AUTH0_CLIENT_ID"
+client_secret = "YOUR_AUTH0_CLIENT_SECRET"
+# Same audience as math-agents API
+audience = "https://api.scimigo.com"
+# kb.scimigo.com callback
+callback_url = "https://kb.scimigo.com/api/v1/auth/callback"
+# CRITICAL: Same Redis as math-agents for shared sessions
+redis_url = "redis://math-agents-cache.xxxxx.cache.amazonaws.com:6379/0"

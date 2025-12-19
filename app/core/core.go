@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"github.com/samber/lo"
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/quka-ai/quka-ai/app/core/srv"
 	"github.com/quka-ai/quka-ai/app/store"
 	"github.com/quka-ai/quka-ai/app/store/sqlstore"
+	"github.com/quka-ai/quka-ai/pkg/auth"
 	"github.com/quka-ai/quka-ai/pkg/types"
 	"github.com/quka-ai/quka-ai/pkg/utils/editorjs"
 )
@@ -35,6 +37,10 @@ type Core struct {
 
 	metrics *Metrics
 	Plugins
+
+	// Auth0 SSO 相关
+	auth0Validator *auth.Auth0Validator
+	sessionService *auth.SessionService
 }
 
 func MustSetupCore(cfg CoreConfig) *Core {
@@ -67,7 +73,47 @@ func MustSetupCore(cfg CoreConfig) *Core {
 	// setup store
 	setupSqlStore(core)
 
+	// setup Auth0 if enabled
+	if cfg.Auth0.Enabled {
+		core.auth0Validator = auth.NewAuth0Validator(cfg.Auth0.Domain, cfg.Auth0.Audience)
+		slog.Info("Auth0 SSO enabled", "domain", cfg.Auth0.Domain)
+
+		// 初始化 Redis 用于共享 session
+		if cfg.Auth0.RedisURL != "" {
+			redisOpts, err := redis.ParseURL(cfg.Auth0.RedisURL)
+			if err != nil {
+				slog.Error("Failed to parse Auth0 Redis URL", "error", err)
+			} else {
+				redisClient := redis.NewClient(redisOpts)
+				core.sessionService = auth.NewSessionService(redisClient)
+				slog.Info("Auth0 session service initialized with Redis", "redis_url", cfg.Auth0.RedisURL)
+			}
+		} else {
+			slog.Warn("Auth0 enabled but redis_url not configured - session sharing will not work")
+		}
+	}
+
 	return core
+}
+
+// SetSessionService 设置 session 服务 (需要 Redis 客户端，在 main 中初始化)
+func (s *Core) SetSessionService(sessionService *auth.SessionService) {
+	s.sessionService = sessionService
+}
+
+// Auth0Validator 获取 Auth0 验证器
+func (s *Core) Auth0Validator() *auth.Auth0Validator {
+	return s.auth0Validator
+}
+
+// SessionService 获取 session 服务
+func (s *Core) SessionService() *auth.SessionService {
+	return s.sessionService
+}
+
+// Auth0Enabled 检查 Auth0 是否启用
+func (s *Core) Auth0Enabled() bool {
+	return s.cfg.Auth0.Enabled && s.auth0Validator != nil
 }
 
 // loadAIConfigFromDB 从数据库加载AI配置的公共方法

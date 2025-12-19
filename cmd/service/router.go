@@ -91,6 +91,16 @@ func setupHttpRouter(s *handler.HttpSrv) {
 			response.APISuccess(c, s.Core.Plugins.Name())
 		})
 		apiV1.GET("/connect", handler.Websocket(s.Core))
+
+		// Auth0 SSO 路由 (公开端点，无需认证)
+		auth := apiV1.Group("/auth")
+		{
+			auth.GET("/login", s.Auth0Login)       // 重定向到 Auth0 登录
+			auth.GET("/callback", s.Auth0Callback) // Auth0 回调处理
+			auth.POST("/logout", s.Auth0Logout)    // 登出
+			auth.GET("/me", middleware.FlexibleAuth(s.Core), s.Auth0Me) // 获取当前用户 (需要认证)
+		}
+
 		share := apiV1.Group("/share")
 		{
 			share.GET("/knowledge/:token", s.GetKnowledgeByShareToken)

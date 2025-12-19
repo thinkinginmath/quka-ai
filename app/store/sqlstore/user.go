@@ -25,15 +25,15 @@ func NewUserStore(provider SqlProviderAchieve) *UserStore {
 	repo := &UserStore{}
 	repo.SetProvider(provider)
 	repo.SetTable(types.TABLE_USER) // 设置表名
-	repo.SetAllColumns("id", "appid", "name", "avatar", "email", "password", "salt", "source", "plan_id", "updated_at", "created_at")
+	repo.SetAllColumns("id", "appid", "auth0_id", "name", "avatar", "email", "password", "salt", "source", "plan_id", "updated_at", "created_at")
 	return repo
 }
 
 // Create 创建新的用户
 func (s *UserStore) Create(ctx context.Context, data types.User) error {
 	query := sq.Insert(s.GetTable()).
-		Columns("id", "appid", "name", "avatar", "email", "password", "salt", "source", "plan_id", "updated_at", "created_at").
-		Values(data.ID, data.Appid, data.Name, data.Avatar, data.Email, data.Password, data.Salt, data.Source, data.PlanID, data.UpdatedAt, data.CreatedAt)
+		Columns("id", "appid", "auth0_id", "name", "avatar", "email", "password", "salt", "source", "plan_id", "updated_at", "created_at").
+		Values(data.ID, data.Appid, data.Auth0ID, data.Name, data.Avatar, data.Email, data.Password, data.Salt, data.Source, data.PlanID, data.UpdatedAt, data.CreatedAt)
 
 	queryString, args, err := query.ToSql()
 	if err != nil {
@@ -66,6 +66,22 @@ func (s *UserStore) GetUser(ctx context.Context, appid, id string) (*types.User,
 // GetByEmail 根据邮箱获取用户
 func (s *UserStore) GetByEmail(ctx context.Context, appid, email string) (*types.User, error) {
 	query := sq.Select(s.GetAllColumns()...).From(s.GetTable()).Where(sq.Eq{"appid": appid, "email": email})
+
+	queryString, args, err := query.ToSql()
+	if err != nil {
+		return nil, ErrorSqlBuild(err)
+	}
+
+	var res types.User
+	if err = s.GetReplica(ctx).Get(&res, queryString, args...); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// GetByAuth0ID 根据 Auth0 ID 获取用户 (用于 SSO 登录)
+func (s *UserStore) GetByAuth0ID(ctx context.Context, appid, auth0ID string) (*types.User, error) {
+	query := sq.Select(s.GetAllColumns()...).From(s.GetTable()).Where(sq.Eq{"appid": appid, "auth0_id": auth0ID})
 
 	queryString, args, err := query.ToSql()
 	if err != nil {
