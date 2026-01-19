@@ -3,12 +3,38 @@ package core
 import (
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 
 	"github.com/quka-ai/quka-ai/app/core/srv"
 )
+
+// envVarPattern matches ${VAR_NAME} or ${VAR_NAME:-default} patterns
+var envVarPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
+
+// expandEnvVars replaces ${VAR} and ${VAR:-default} patterns with environment variable values
+func expandEnvVars(content []byte) []byte {
+	result := envVarPattern.ReplaceAllFunc(content, func(match []byte) []byte {
+		submatches := envVarPattern.FindSubmatch(match)
+		if len(submatches) < 2 {
+			return match
+		}
+
+		varName := string(submatches[1])
+		defaultValue := ""
+		if len(submatches) >= 3 {
+			defaultValue = string(submatches[2])
+		}
+
+		if value := os.Getenv(varName); value != "" {
+			return []byte(value)
+		}
+		return []byte(defaultValue)
+	})
+	return result
+}
 
 func MustLoadBaseConfig(path string) CoreConfig {
 	if path == "" {
@@ -19,10 +45,13 @@ func MustLoadBaseConfig(path string) CoreConfig {
 		panic(err)
 	}
 
-	conf := &CoreConfig{}
-	conf.SetConfigBytes(raw)
+	// Expand environment variables in config (supports ${VAR} and ${VAR:-default})
+	expanded := expandEnvVars(raw)
 
-	if err = toml.Unmarshal(raw, conf); err != nil {
+	conf := &CoreConfig{}
+	conf.SetConfigBytes(expanded)
+
+	if err = toml.Unmarshal(expanded, conf); err != nil {
 		panic(err)
 	}
 

@@ -1,9 +1,10 @@
-.DS_Store 
+.DS_Store
 .vscode
 .env
+.env.*
 _build
 
-go.work 
+go.work
 go.work.*
 
 config-dev.toml
@@ -17,3 +18,13 @@ tmp
 
 docker-compose/data
 docker-compose/etc
+
+# Production configs with secrets (use templates instead)
+deploy/*.local.toml
+deploy/*.secrets.toml
+deploy/service-production.local.toml
+*.pem
+*.key
+
+# Notes and scratch files
+notes.txt

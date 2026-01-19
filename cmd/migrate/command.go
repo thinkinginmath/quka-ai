@@ -67,7 +67,7 @@ func runMigrate(opts *Options) error {
 	cfg := core.MustLoadBaseConfig(opts.ConfigPath)
 
 	fmt.Println("🔌 Connecting to database...")
-	provider := sqlstore.MustSetup(cfg.Database.Master, cfg.Database.Slaves...)()
+	provider := sqlstore.MustSetup(cfg.Postgres)()
 
 	if opts.DryRun {
 		fmt.Println("\n📋 Dry run mode - showing pending migrations:")
@@ -126,7 +126,7 @@ func runStatus(opts *Options) error {
 	cfg := core.MustLoadBaseConfig(opts.ConfigPath)
 
 	fmt.Println("🔌 Connecting to database...")
-	provider := sqlstore.MustSetup(cfg.Database.Master, cfg.Database.Slaves...)()
+	provider := sqlstore.MustSetup(cfg.Postgres)()
 
 	// Get all migrations and their status
 	allMigrations, err := provider.GetAllMigrationFiles()
